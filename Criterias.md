@@ -1,8 +1,8 @@
-1. Butun uygulamalar ve araclar mit/apache-2 lisansli olmali.
-2. Veritabani olarak Postgresql 17 kullanilmali.
-3. Dahili araclarda mumkun oldugunca rust kullanlilmali.
-4. web yazilimi icin react kullanilmali.
-5. video gorusmeleri icin webrtc kullanilmali.
-6. Ancak video dagitimi icin ortak bir server kullanilmaliki boylece bir cok kisi ayni anda baglandiginda herhangi bir sorun kalmasin.
-7. Ayrica, goruntuler cizilirken webcpu kullanilmali.
-
+1. All applications and tools must be MIT/Apache-2 licensed.
+2. PostgreSQL 17 must be used as the database.
+3. Internal tools should use Rust as much as possible.
+4. React must be used for the web application.
+5. WebRTC must be used for video calls.
+6. Video distribution must go through a shared server so many people can connect at once without congestion.
+7. Frames must be drawn with WebGPU.
+8. Everything must be in English: user interface, documentation, comments, and messages.

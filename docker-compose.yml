@@ -1,0 +1,62 @@
+services:
+  frontend-db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: sosial
+      POSTGRES_PASSWORD: sosial
+      POSTGRES_DB: sosial_video
+    volumes:
+      - frontend_db_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sosial -d sosial_video"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web-contact-service:
+    build:
+      context: ./services/web-contact-service
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8081
+      PG_HOST: frontend-db
+      PG_PORT: "5432"
+      PG_USER: sosial
+      PG_PASSWORD: sosial
+      PG_DB: sosial_video
+      RUST_LOG: info
+    ports:
+      - "8081:8081"
+    depends_on:
+      frontend-db:
+        condition: service_healthy
+
+  webrtc-service:
+    build:
+      context: ./services/webrtc-service
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8082
+      WEBRTC_UDP_PORT_MIN: "40000"
+      WEBRTC_UDP_PORT_MAX: "40031"
+      WEBRTC_ANNOUNCED_IP: 127.0.0.1
+      RUST_LOG: info
+    ports:
+      - "8082:8082"
+      - "40000-40031:40000-40031/udp"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_CONTACT_API: http://localhost:8081
+        VITE_WEBRTC_API: http://localhost:8082
+    ports:
+      - "3000:3000"
+    depends_on:
+      - web-contact-service
+      - webrtc-service
+
+volumes:
+  frontend_db_data:
