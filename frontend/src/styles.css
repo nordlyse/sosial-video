@@ -125,13 +125,35 @@ textarea {
 }
 
 .login-card {
-  width: min(440px, 100%);
+  width: min(460px, 100%);
   z-index: 1;
+  display: grid;
+  gap: 14px;
 }
 
 .login-card form {
   display: grid;
   gap: 14px;
+}
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+}
+
+.auth-tabs button {
+  border: 0;
+  padding: 8px 12px;
+}
+
+.auth-tabs button.active {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: #fff;
 }
 
 .eyebrow {
@@ -213,6 +235,11 @@ button:disabled {
   margin: 0;
 }
 
+.success {
+  color: var(--cyan);
+  margin: 0;
+}
+
 .studio {
   position: relative;
   isolation: isolate;
@@ -250,6 +277,7 @@ header {
   background: rgba(6, 0, 16, 0.62);
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(18px);
+  flex-wrap: wrap;
 }
 
 .header-actions {
@@ -338,8 +366,14 @@ header {
   height: 160px;
 }
 
+.rail .tile-video {
+  min-height: 0;
+  height: 100%;
+}
+
 .lobby-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 14px 22px 0;
 }
@@ -367,6 +401,7 @@ header {
 }
 
 .lobby-panel.tab-live,
+.lobby-panel.tab-public,
 .lobby-panel.tab-contacts {
   grid-template-columns: minmax(0, 720px);
 }
@@ -574,6 +609,77 @@ header {
 .row-actions button {
   grid-column: auto;
   justify-self: start;
+}
+
+.secure-banner {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(82, 39, 255, 0.16);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.secure-banner a {
+  color: var(--cyan);
+}
+
+.start-form {
+  position: fixed;
+  z-index: 30;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(440px, calc(100% - 32px));
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  border-radius: 20px;
+  background: rgba(12, 8, 28, 0.94);
+  border: 1px solid var(--line);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.start-form h2 {
+  margin: 0;
+}
+
+.search-label {
+  margin-bottom: 8px;
+}
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0;
+}
+
+.tag-chip {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  color: var(--cyan);
+  background: rgba(103, 232, 249, 0.08);
+}
+
+.broadcast-copy {
+  min-width: 0;
+}
+
+.broadcast-copy em {
+  display: block;
+  margin-top: 2px;
+}
+
+.tile-play {
+  position: absolute;
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%);
+  z-index: 4;
+  pointer-events: auto;
 }
 
 .camera-other {

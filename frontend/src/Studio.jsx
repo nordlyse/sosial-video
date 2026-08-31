@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import {
   acceptJoin,
+  canUseCamera,
   endBroadcast,
   fetchContacts,
+  fetchPublicBroadcasts,
   fetchStudio,
   heartbeat,
+  httpsAppUrl,
   leaveBroadcast,
   listPublishers,
   logout,
+  openUserMedia,
   publishPeer,
   rejectJoin,
   requestJoin,
@@ -15,6 +19,7 @@ import {
   setSpeaking,
   startBroadcast,
   subscribePeer,
+  unlockMediaPlayback,
 } from "./api.js";
 import { userEmoji } from "./avatar.js";
 import GradientText from "./bits/GradientText.jsx";
@@ -28,6 +33,7 @@ export default function Studio({ session, onLogout }) {
   const [contacts, setContacts] = useState([]);
   const [studio, setStudio] = useState({
     broadcasts: [],
+    public_broadcasts: [],
     membership: null,
     incoming_requests: [],
     outgoing_requests: [],
@@ -39,6 +45,11 @@ export default function Studio({ session, onLogout }) {
   const [remoteStreams, setRemoteStreams] = useState({});
   const [lobbyTab, setLobbyTab] = useState("camera");
   const [cameraUser, setCameraUser] = useState(() => session.user);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [publicQuery, setPublicQuery] = useState("");
+  const [publicResults, setPublicResults] = useState(null);
+  const [showStartForm, setShowStartForm] = useState(false);
+  const httpsHint = httpsAppUrl();
   const localStreamRef = useRef(null);
   const publishPcRef = useRef(null);
   const publishKeyRef = useRef("");
@@ -47,6 +58,7 @@ export default function Studio({ session, onLogout }) {
   const analyserRef = useRef(null);
   const lastReactAtRef = useRef(0);
   const [reactionBurst, setReactionBurst] = useState(null);
+  const syncLockRef = useRef(false);
 
   const membership = studio.membership;
   const me = session.user.username;
@@ -62,9 +74,17 @@ export default function Studio({ session, onLogout }) {
     if (!broadcastId || localStreamRef.current) {
       return undefined;
     }
+    if (!canUseCamera()) {
+      if (httpsHint) {
+        setStatus(
+          `Camera and live video need HTTPS. Open ${httpsHint} on this phone, continue past the certificate warning, then allow camera access.`
+        );
+      }
+      return undefined;
+    }
     openCamera().catch(() => {});
     return undefined;
-  }, [broadcastId]);
+  }, [broadcastId, httpsHint]);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,6 +126,10 @@ export default function Studio({ session, onLogout }) {
     }
     let cancelled = false;
     async function syncRoom() {
+      if (syncLockRef.current) {
+        return;
+      }
+      syncLockRef.current = true;
       try {
         const info = await listPublishers(roomId);
         if (cancelled) {
@@ -131,6 +155,10 @@ export default function Studio({ session, onLogout }) {
           const pc = await subscribePeer(roomId, publisher.peer_id, (stream) => {
             setRemoteStreams((prev) => ({ ...prev, [publisher.peer_id]: stream }));
           });
+          if (cancelled) {
+            pc.close();
+            return;
+          }
           subsRef.current.set(publisher.peer_id, { pc, key });
         }
         for (const [peerId, sub] of subsRef.current) {
@@ -148,10 +176,12 @@ export default function Studio({ session, onLogout }) {
         if (!cancelled) {
           setStatus(err.message);
         }
+      } finally {
+        syncLockRef.current = false;
       }
     }
     syncRoom();
-    const timer = setInterval(syncRoom, 2000);
+    const timer = setInterval(syncRoom, 1000);
     return () => {
       cancelled = true;
       clearInterval(timer);
@@ -159,14 +189,17 @@ export default function Studio({ session, onLogout }) {
   }, [roomId, me]);
 
   useEffect(() => {
-    if (!roomId || !localStream || !membershipRole) {
+    if (!roomId || !localStream) {
       return undefined;
     }
-    const tracks = localStream.getTracks();
+    const tracks = localStream.getTracks().filter((track) => track.readyState !== "ended");
     if (tracks.length === 0) {
       return undefined;
     }
-    const key = `${roomId}:${tracks.map((track) => track.id).join(",")}`;
+    tracks.forEach((track) => {
+      track.enabled = true;
+    });
+    const key = `${roomId}:${tracks.map((track) => `${track.kind}:${track.id}`).join(",")}`;
     if (publishKeyRef.current === key && publishPcRef.current) {
       return undefined;
     }
@@ -185,7 +218,9 @@ export default function Studio({ session, onLogout }) {
         }
         publishPcRef.current = pc;
         publishKeyRef.current = key;
+        setStatus("Camera is sending to the room.");
       } catch (err) {
+        publishKeyRef.current = "";
         if (!cancelled) {
           setStatus(err.message);
         }
@@ -231,6 +266,31 @@ export default function Studio({ session, onLogout }) {
       }
     };
   }, [broadcastId, membershipRole, localStream, session.token]);
+
+  useEffect(() => {
+    if (lobbyTab !== "public") {
+      return undefined;
+    }
+    let cancelled = false;
+    async function refreshPublic() {
+      try {
+        const list = await fetchPublicBroadcasts(session.token, publicQuery);
+        if (!cancelled) {
+          setPublicResults(list);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setStatus(err.message);
+        }
+      }
+    }
+    refreshPublic();
+    const timer = setInterval(refreshPublic, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [lobbyTab, publicQuery, session.token]);
 
   useEffect(() => {
     return () => {
@@ -293,15 +353,28 @@ export default function Studio({ session, onLogout }) {
     onLogout();
   }
 
+  async function handleSendCamera() {
+    unlockMediaPlayback();
+    try {
+      if (!localStreamRef.current) {
+        await openCamera();
+        return;
+      }
+      publishKeyRef.current = "";
+      setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+      setStatus("Sending camera to the room...");
+    } catch (err) {
+      setStatus(err.message);
+    }
+  }
+
   async function openCamera() {
     setStatus("");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user" },
-        audio: true,
-      });
+      const stream = await openUserMedia();
       localStreamRef.current = stream;
       setLocalStream(stream);
+      unlockMediaPlayback();
       setStatus("Camera is on. Start a broadcast or ask to join one.");
       setLobbyTab("camera");
       setCameraUser(session.user);
@@ -312,13 +385,20 @@ export default function Studio({ session, onLogout }) {
     }
   }
 
-  async function handleStartBroadcast() {
+  function handleStartClick() {
+    setShowStartForm(true);
+    setTitleDraft((prev) => prev || "#");
+  }
+
+  async function handleStartBroadcast(event) {
+    event.preventDefault();
     try {
       setStatus("Starting broadcast...");
-      if (!localStreamRef.current) {
+      if (!localStreamRef.current && canUseCamera()) {
         await openCamera();
       }
-      const created = await startBroadcast(session.token);
+      const created = await startBroadcast(session.token, titleDraft, true);
+      setShowStartForm(false);
       setStudio((prev) => ({ ...prev, membership: created }));
       await reloadStudio();
       setStatus("Broadcast is live. Join requests will appear at the top of your video.");
@@ -340,6 +420,10 @@ export default function Studio({ session, onLogout }) {
 
   async function handleAskToJoin(id) {
     try {
+      if (!localStreamRef.current && canUseCamera()) {
+        await openCamera();
+      }
+      unlockMediaPlayback();
       await requestJoin(session.token, id);
       await reloadStudio();
       setStatus("Join request sent. The host will see it on their screen.");
@@ -350,6 +434,7 @@ export default function Studio({ session, onLogout }) {
 
   async function handleAccept(request, role) {
     try {
+      unlockMediaPlayback();
       await acceptJoin(session.token, request.broadcast_id, request.id, role);
       await reloadStudio();
       setStatus(`${request.from.username} joined as ${role}.`);
@@ -423,6 +508,57 @@ export default function Studio({ session, onLogout }) {
   const mainRole = speaker?.role || (inCall ? membershipRole : "you");
   const showMain = Boolean(speaker || localStream);
   const railPeople = inCall ? others : [];
+  const publicList = publicResults ?? studio.public_broadcasts ?? [];
+
+  function broadcastRow(broadcast) {
+    const outgoing = studio.outgoing_requests.find((item) => item.broadcast_id === broadcast.id);
+    const isHost = broadcast.host.username === me;
+    const tags = broadcast.tags || [];
+    return (
+      <li key={broadcast.id}>
+        <div className="broadcast-copy">
+          <strong>{broadcast.title || `${broadcast.host.username}'s broadcast`}</strong>
+          <span className="dot on" />
+          <em>
+            {broadcast.host.username} · {broadcast.member_count} in room
+            {outgoing ? ` · ${outgoing.status}` : ""}
+          </em>
+          {tags.length > 0 ? (
+            <p className="tag-row">
+              {tags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  className="tag-chip"
+                  onClick={() => {
+                    setPublicQuery(`#${tag}`);
+                    setLobbyTab("public");
+                  }}
+                >
+                  #{tag}
+                </button>
+              ))}
+            </p>
+          ) : null}
+        </div>
+        <div className="row-actions">
+          <button type="button" className="tiny ghost" onClick={() => openCameraPage(broadcast.host)}>
+            Open camera
+          </button>
+          {!isHost ? (
+            <button
+              type="button"
+              className="tiny glow-button"
+              disabled={outgoing?.status === "pending"}
+              onClick={() => handleAskToJoin(broadcast.id)}
+            >
+              {outgoing?.status === "pending" ? "Waiting for host" : "Ask to join"}
+            </button>
+          ) : null}
+        </div>
+      </li>
+    );
+  }
 
   return (
     <main className={`studio ${inCall ? "in-call" : "lobby"}`}>
@@ -432,15 +568,19 @@ export default function Studio({ session, onLogout }) {
           <p className="eyebrow">Sosial Video</p>
           <h1>
             {inCall ? (
-              <GradientText>{`${membership.host.username}'s broadcast`}</GradientText>
+              <GradientText>
+                {membership.title
+                  ? membership.title
+                  : `${membership.host.username}'s broadcast`}
+              </GradientText>
             ) : (
               <GradientText>{me}</GradientText>
             )}
           </h1>
         </div>
         <div className="header-actions">
-          <button type="button" className="glow-button" onClick={openCamera} disabled={Boolean(localStream)}>
-            {localStream ? "Camera on" : "Open camera"}
+          <button type="button" className="glow-button" onClick={inCall ? handleSendCamera : openCamera}>
+            {inCall ? (localStream ? "Resend camera" : "Send camera") : localStream ? "Camera on" : "Open camera"}
           </button>
           {hostView ? (
             <button type="button" className="ghost" onClick={handleEndBroadcast}>
@@ -451,7 +591,7 @@ export default function Studio({ session, onLogout }) {
               Leave broadcast
             </button>
           ) : (
-            <button type="button" className="glow-button" onClick={handleStartBroadcast}>
+            <button type="button" className="glow-button" onClick={handleStartClick}>
               Start broadcast
             </button>
           )}
@@ -459,7 +599,41 @@ export default function Studio({ session, onLogout }) {
             Sign out
           </button>
         </div>
+        {httpsHint && !inCall ? (
+          <p className="secure-banner">
+            On a phone, open <a href={httpsHint}>{httpsHint}</a> so camera and live video can work, then
+            continue past the certificate warning.
+          </p>
+        ) : null}
       </header>
+
+      {showStartForm && !inCall ? (
+        <form className="start-form" onSubmit={handleStartBroadcast}>
+          <h2>Start a public broadcast</h2>
+          <p className="hint">
+            Add a title with topics as hashtags, for example <code>#discussion #politics</code>. Other
+            people can search those tags even if they are not contacts.
+          </p>
+          <label>
+            Title
+            <input
+              value={titleDraft}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              placeholder="#discussion #politics"
+              maxLength={120}
+              autoFocus
+            />
+          </label>
+          <div className="request-actions">
+            <button type="submit" className="glow-button">
+              Go live
+            </button>
+            <button type="button" className="ghost" onClick={() => setShowStartForm(false)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
 
       {inCall ? (
         <section className={`call ${railPeople.length > 0 ? "with-rail" : "solo"}`}>
@@ -495,7 +669,11 @@ export default function Studio({ session, onLogout }) {
                 local={mainName === me}
               />
             ) : (
-              <div className="empty-stage">Open your camera, then start a broadcast.</div>
+              <div className="empty-stage">
+                {inCall
+                  ? "Waiting for live video. On a phone, open this app over HTTPS on port 8443."
+                  : "Open your camera, then start a broadcast."}
+              </div>
             )}
             <ReactionOverlay
               key={broadcastId}
@@ -538,6 +716,13 @@ export default function Studio({ session, onLogout }) {
           <nav className="lobby-tabs" aria-label="Studio sections">
             <button
               type="button"
+              className={lobbyTab === "public" ? "active" : ""}
+              onClick={() => setLobbyTab("public")}
+            >
+              Public
+            </button>
+            <button
+              type="button"
               className={lobbyTab === "live" ? "active" : ""}
               onClick={() => setLobbyTab("live")}
             >
@@ -559,47 +744,37 @@ export default function Studio({ session, onLogout }) {
             </button>
           </nav>
           <section className={`lobby-panel tab-${lobbyTab}`}>
+            {lobbyTab === "public" ? (
+              <SpotlightCard>
+                <h2>Public broadcasts</h2>
+                <p className="hint">
+                  Search by hashtag such as #discussion. Without a search, the 10 busiest live rooms in
+                  your language are shown.
+                </p>
+                <label className="search-label">
+                  Search
+                  <input
+                    value={publicQuery}
+                    onChange={(event) => setPublicQuery(event.target.value)}
+                    placeholder="#politics"
+                  />
+                </label>
+                <ul>
+                  {publicList.length === 0 ? (
+                    <li>No public live broadcasts match this search yet.</li>
+                  ) : null}
+                  {publicList.map((broadcast) => broadcastRow(broadcast))}
+                </ul>
+              </SpotlightCard>
+            ) : null}
+
             {lobbyTab === "live" ? (
               <SpotlightCard>
                 <h2>Live broadcasts</h2>
                 <p className="hint">Ask to join. The host sees your request on their video and can accept it.</p>
                 <ul>
                   {studio.broadcasts.length === 0 ? <li>No live broadcasts yet.</li> : null}
-                  {studio.broadcasts.map((broadcast) => {
-                    const outgoing = studio.outgoing_requests.find(
-                      (item) => item.broadcast_id === broadcast.id
-                    );
-                    const isHost = broadcast.host.username === me;
-                    return (
-                      <li key={broadcast.id}>
-                        <strong>{broadcast.host.username}</strong>
-                        <span className="dot on" />
-                        <em>
-                          {broadcast.member_count} in room
-                          {outgoing ? ` · ${outgoing.status}` : ""}
-                        </em>
-                        <div className="row-actions">
-                          <button
-                            type="button"
-                            className="tiny ghost"
-                            onClick={() => openCameraPage(broadcast.host)}
-                          >
-                            Open camera
-                          </button>
-                          {!isHost ? (
-                            <button
-                              type="button"
-                              className="tiny glow-button"
-                              disabled={outgoing?.status === "pending"}
-                              onClick={() => handleAskToJoin(broadcast.id)}
-                            >
-                              {outgoing?.status === "pending" ? "Waiting for host" : "Ask to join"}
-                            </button>
-                          ) : null}
-                        </div>
-                      </li>
-                    );
-                  })}
+                  {studio.broadcasts.map((broadcast) => broadcastRow(broadcast))}
                 </ul>
               </SpotlightCard>
             ) : null}

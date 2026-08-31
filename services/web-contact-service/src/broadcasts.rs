@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -8,12 +8,15 @@ use uuid::Uuid;
 
 use crate::{current_user, error, internal, AppState, UserView};
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct BroadcastView {
     id: i32,
     room_id: String,
     host: UserView,
     member_count: i64,
+    title: String,
+    tags: Vec<String>,
+    is_public: bool,
 }
 
 #[derive(Serialize)]
@@ -22,6 +25,7 @@ pub struct MembershipView {
     room_id: String,
     role: String,
     host: UserView,
+    title: String,
 }
 
 #[derive(Serialize)]
@@ -60,6 +64,7 @@ pub struct ReactionView {
 #[derive(Serialize)]
 pub struct StudioView {
     broadcasts: Vec<BroadcastView>,
+    public_broadcasts: Vec<BroadcastView>,
     membership: Option<MembershipView>,
     incoming_requests: Vec<JoinRequestView>,
     outgoing_requests: Vec<OutgoingRequestView>,
@@ -73,6 +78,24 @@ pub struct ReactionRequest {
 }
 
 const ALLOWED_REACTIONS: &[&str] = &["❤️", "❤", "👍", "👎", "😂", "🔥", "👏", "😮", "😢", "🎉"];
+
+#[derive(Deserialize)]
+pub struct StartBroadcastRequest {
+    #[serde(default)]
+    title: String,
+    #[serde(default = "default_public")]
+    is_public: bool,
+}
+
+fn default_public() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+pub struct PublicQuery {
+    #[serde(default)]
+    q: String,
+}
 
 #[derive(Deserialize)]
 pub struct AcceptRequest {
@@ -144,6 +167,10 @@ pub async fn ensure_schema(pool: &deadpool_postgres::Pool) -> anyhow::Result<()>
             );
             CREATE INDEX IF NOT EXISTS broadcast_reactions_live_idx
                 ON broadcast_reactions (broadcast_id, created_at DESC);
+            ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT '';
+            ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
+            ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT true;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS locale TEXT NOT NULL DEFAULT 'en';
             ",
         )
         .await?;
@@ -156,35 +183,14 @@ pub async fn studio(
 ) -> Result<Json<StudioView>, (StatusCode, Json<crate::ErrorBody>)> {
     let (user, _) = current_user(&state, &headers).await?;
     let client = state.pool.get().await.map_err(internal)?;
+    let locale = user_locale(&client, user.id).await?;
 
-    let broadcast_rows = client
-        .query(
-            "SELECT b.id, b.room_id, u.id, u.username,
-                    (SELECT count(*)::bigint FROM broadcast_members m WHERE m.broadcast_id = b.id)
-             FROM broadcasts b
-             JOIN users u ON u.id = b.host_user_id
-             WHERE b.ended_at IS NULL
-             ORDER BY b.started_at DESC",
-            &[],
-        )
-        .await
-        .map_err(internal)?;
-    let broadcasts = broadcast_rows
-        .into_iter()
-        .map(|row| BroadcastView {
-            id: row.get(0),
-            room_id: row.get(1),
-            host: UserView {
-                id: row.get(2),
-                username: row.get(3),
-            },
-            member_count: row.get(4),
-        })
-        .collect();
+    let broadcasts = load_live_broadcasts(&client, 50).await?;
+    let public_broadcasts = load_public_broadcasts(&client, "", &locale, 10).await?;
 
     let membership_row = client
         .query_opt(
-            "SELECT b.id, b.room_id, m.role, h.id, h.username
+            "SELECT b.id, b.room_id, m.role, h.id, h.username, COALESCE(b.title, '')
              FROM broadcast_members m
              JOIN broadcasts b ON b.id = m.broadcast_id
              JOIN users h ON h.id = b.host_user_id
@@ -201,6 +207,7 @@ pub async fn studio(
             id: row.get(3),
             username: row.get(4),
         },
+        title: row.get(5),
     });
 
     let incoming_rows = client
@@ -287,12 +294,151 @@ pub async fn studio(
 
     Ok(Json(StudioView {
         broadcasts,
+        public_broadcasts,
         membership,
         incoming_requests,
         outgoing_requests,
         participants,
         recent_reactions,
     }))
+}
+
+pub async fn public_broadcasts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PublicQuery>,
+) -> Result<Json<Vec<BroadcastView>>, (StatusCode, Json<crate::ErrorBody>)> {
+    let (user, _) = current_user(&state, &headers).await?;
+    let client = state.pool.get().await.map_err(internal)?;
+    let locale = user_locale(&client, user.id).await?;
+    let list = load_public_broadcasts(&client, query.q.trim(), &locale, 40).await?;
+    Ok(Json(list))
+}
+
+async fn user_locale(
+    client: &deadpool_postgres::Object,
+    user_id: i32,
+) -> Result<String, (StatusCode, Json<crate::ErrorBody>)> {
+    let row = client
+        .query_one(
+            "SELECT COALESCE(NULLIF(locale, ''), 'en') FROM users WHERE id = $1",
+            &[&user_id],
+        )
+        .await
+        .map_err(internal)?;
+    Ok(primary_locale(row.get::<_, String>(0)))
+}
+
+async fn load_live_broadcasts(
+    client: &deadpool_postgres::Object,
+    limit: i64,
+) -> Result<Vec<BroadcastView>, (StatusCode, Json<crate::ErrorBody>)> {
+    map_broadcast_rows(
+        client
+            .query(
+                "SELECT b.id, b.room_id, COALESCE(b.title, ''), COALESCE(b.tags, ARRAY[]::text[]),
+                        COALESCE(b.is_public, true), u.id, u.username,
+                        (SELECT count(*)::bigint FROM broadcast_members m WHERE m.broadcast_id = b.id)
+                 FROM broadcasts b
+                 JOIN users u ON u.id = b.host_user_id
+                 WHERE b.ended_at IS NULL
+                 ORDER BY b.started_at DESC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(internal)?,
+    )
+}
+
+async fn load_public_broadcasts(
+    client: &deadpool_postgres::Object,
+    raw_query: &str,
+    locale: &str,
+    limit: i64,
+) -> Result<Vec<BroadcastView>, (StatusCode, Json<crate::ErrorBody>)> {
+    let tag = normalize_search_tag(raw_query);
+    let searching = !tag.is_empty();
+    let like = format!("%{tag}%");
+    let rows = client
+        .query(
+            "SELECT b.id, b.room_id, COALESCE(b.title, ''), COALESCE(b.tags, ARRAY[]::text[]),
+                    COALESCE(b.is_public, true), u.id, u.username,
+                    (SELECT count(*)::bigint FROM broadcast_members m WHERE m.broadcast_id = b.id)
+             FROM broadcasts b
+             JOIN users u ON u.id = b.host_user_id
+             WHERE b.ended_at IS NULL
+               AND COALESCE(b.is_public, true) = true
+               AND (
+                    $1 = false
+                    OR b.title ILIKE $2
+                    OR EXISTS (
+                        SELECT 1 FROM unnest(COALESCE(b.tags, ARRAY[]::text[])) AS t(tag)
+                        WHERE t.tag ILIKE $2
+                    )
+               )
+               AND (
+                    $1 = true
+                    OR lower(split_part(COALESCE(u.locale, 'en'), '-', 1)) = $3
+               )
+             ORDER BY (SELECT count(*) FROM broadcast_members m WHERE m.broadcast_id = b.id) DESC,
+                      b.started_at DESC
+             LIMIT $4",
+            &[&searching, &like, &locale, &limit],
+        )
+        .await
+        .map_err(internal)?;
+    let mut list = map_broadcast_rows(rows)?;
+    if !searching && list.is_empty() {
+        list = load_public_broadcasts_worldwide(client, limit).await?;
+    }
+    Ok(list)
+}
+
+async fn load_public_broadcasts_worldwide(
+    client: &deadpool_postgres::Object,
+    limit: i64,
+) -> Result<Vec<BroadcastView>, (StatusCode, Json<crate::ErrorBody>)> {
+    map_broadcast_rows(
+        client
+            .query(
+                "SELECT b.id, b.room_id, COALESCE(b.title, ''), COALESCE(b.tags, ARRAY[]::text[]),
+                        COALESCE(b.is_public, true), u.id, u.username,
+                        (SELECT count(*)::bigint FROM broadcast_members m WHERE m.broadcast_id = b.id)
+                 FROM broadcasts b
+                 JOIN users u ON u.id = b.host_user_id
+                 WHERE b.ended_at IS NULL AND COALESCE(b.is_public, true) = true
+                 ORDER BY (SELECT count(*) FROM broadcast_members m WHERE m.broadcast_id = b.id) DESC,
+                          b.started_at DESC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(internal)?,
+    )
+}
+
+fn map_broadcast_rows(
+    rows: Vec<tokio_postgres::Row>,
+) -> Result<Vec<BroadcastView>, (StatusCode, Json<crate::ErrorBody>)> {
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let tags: Vec<String> = row.get(3);
+            BroadcastView {
+                id: row.get(0),
+                room_id: row.get(1),
+                title: row.get(2),
+                tags,
+                is_public: row.get(4),
+                host: UserView {
+                    id: row.get(5),
+                    username: row.get(6),
+                },
+                member_count: row.get(7),
+            }
+        })
+        .collect())
 }
 
 async fn load_recent_reactions(
@@ -330,6 +476,7 @@ async fn load_recent_reactions(
 pub async fn start_broadcast(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Json(body): Json<StartBroadcastRequest>,
 ) -> Result<Json<MembershipView>, (StatusCode, Json<crate::ErrorBody>)> {
     let (user, _) = current_user(&state, &headers).await?;
     let client = state.pool.get().await.map_err(internal)?;
@@ -351,12 +498,21 @@ pub async fn start_broadcast(
         ));
     }
 
+    let title = body.title.trim();
+    if title.len() > 120 {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "title must be 120 characters or less",
+        ));
+    }
+    let tags = parse_tags(title);
     let room_id = format!("{}-{}", user.username, Uuid::new_v4().simple());
     let row = client
         .query_one(
-            "INSERT INTO broadcasts (host_user_id, room_id) VALUES ($1, $2)
+            "INSERT INTO broadcasts (host_user_id, room_id, title, tags, is_public)
+             VALUES ($1, $2, $3, $4, $5)
              RETURNING id",
-            &[&user.id, &room_id],
+            &[&user.id, &room_id, &title, &tags, &body.is_public],
         )
         .await
         .map_err(internal)?;
@@ -374,6 +530,7 @@ pub async fn start_broadcast(
         room_id,
         role: "host".into(),
         host: user,
+        title: title.to_string(),
     }))
 }
 
@@ -665,5 +822,56 @@ fn normalize_reaction(emoji: &str) -> String {
         "❤️".into()
     } else {
         trimmed.to_string()
+    }
+}
+
+pub fn parse_tags(title: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut chars = title.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '#' {
+            continue;
+        }
+        let mut tag = String::new();
+        while let Some(&next) = chars.peek() {
+            if next.is_alphanumeric() || next == '_' {
+                for lower in next.to_lowercase() {
+                    tag.push(lower);
+                }
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if !tag.is_empty() && !tags.iter().any(|existing| existing == &tag) {
+            tags.push(tag);
+        }
+        if tags.len() == 8 {
+            break;
+        }
+    }
+    tags
+}
+
+fn normalize_search_tag(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('#')
+        .chars()
+        .take(32)
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn primary_locale(raw: String) -> String {
+    let primary = raw
+        .split([',', ';', '-', '_'])
+        .next()
+        .unwrap_or("en")
+        .trim()
+        .to_lowercase();
+    if primary.is_empty() || primary.len() > 8 {
+        "en".into()
+    } else {
+        primary
     }
 }

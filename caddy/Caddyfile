@@ -1,0 +1,30 @@
+{
+	admin off
+	auto_https disable_redirects
+}
+
+:8443 {
+	tls internal {
+		on_demand
+	}
+
+	handle_path /api/* {
+		reverse_proxy web-contact-service:8081 {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	handle_path /sfu/* {
+		reverse_proxy webrtc-service:8082 {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
