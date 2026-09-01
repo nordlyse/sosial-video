@@ -8,7 +8,7 @@ export default function CommentsPanel({ token, broadcastId, targetUser, currentU
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [expanded, setExpanded] = useState(() => (compact ? false : readExpanded()));
+  const [expanded, setExpanded] = useState(() => (compact ? true : readExpanded()));
   const [composer, setComposer] = useState(null);
   const listRef = useRef(null);
   const isOwner = currentUser?.id === targetUser?.id;

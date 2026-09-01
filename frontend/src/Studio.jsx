@@ -636,7 +636,7 @@ export default function Studio({ session, onLogout }) {
       ) : null}
 
       {inCall ? (
-        <section className={`call ${railPeople.length > 0 ? "with-rail" : "solo"}`}>
+        <section className="call with-comments">
           <div className="main-stage">
             {hostView && incoming.length > 0 ? (
               <div className="join-banner">
@@ -682,33 +682,33 @@ export default function Studio({ session, onLogout }) {
               selfUsername={me}
             />
             <ReactionBar onReact={handleReact} />
-            <aside className="call-comments">
-              <CommentsPanel
-                token={session.token}
-                broadcastId={broadcastId}
-                targetUser={membership.host}
-                currentUser={session.user}
-                compact
-              />
-            </aside>
+            {railPeople.length > 0 ? (
+              <aside className="rail">
+                {railPeople.map((participant) => (
+                  <ParticipantTile
+                    key={participant.user.id}
+                    stream={streamFor(participant.user.username)}
+                    username={participant.user.username}
+                    role={participant.role}
+                    speaking={participant.speaking}
+                    compact
+                    local={participant.user.username === me}
+                  />
+                ))}
+              </aside>
+            ) : null}
             {status ? <p className="call-status">{status}</p> : null}
           </div>
 
-          {railPeople.length > 0 ? (
-            <aside className="rail">
-              {railPeople.map((participant) => (
-                <ParticipantTile
-                  key={participant.user.id}
-                  stream={streamFor(participant.user.username)}
-                  username={participant.user.username}
-                  role={participant.role}
-                  speaking={participant.speaking}
-                  compact
-                  local={participant.user.username === me}
-                />
-              ))}
-            </aside>
-          ) : null}
+          <aside className="call-comments">
+            <CommentsPanel
+              token={session.token}
+              broadcastId={broadcastId}
+              targetUser={membership.host}
+              currentUser={session.user}
+              compact
+            />
+          </aside>
         </section>
       ) : null}
 
