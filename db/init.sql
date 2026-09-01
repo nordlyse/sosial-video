@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS broadcast_speaking (
 
 CREATE TABLE IF NOT EXISTS camera_comments (
     id               SERIAL PRIMARY KEY,
+    broadcast_id     INTEGER REFERENCES broadcasts (id) ON DELETE CASCADE,
     target_user_id   INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     from_user_id     INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     body             TEXT NOT NULL,
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS camera_comments (
 );
 
 CREATE INDEX IF NOT EXISTS camera_comments_target_idx ON camera_comments (target_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS camera_comments_broadcast_idx ON camera_comments (broadcast_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS broadcast_reactions (
     id           SERIAL PRIMARY KEY,

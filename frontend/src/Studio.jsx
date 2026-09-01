@@ -685,6 +685,7 @@ export default function Studio({ session, onLogout }) {
             <aside className="call-comments">
               <CommentsPanel
                 token={session.token}
+                broadcastId={broadcastId}
                 targetUser={membership.host}
                 currentUser={session.user}
                 compact
@@ -823,6 +824,7 @@ export default function Studio({ session, onLogout }) {
                 <div className="comments-card">
                   <CommentsPanel
                     token={session.token}
+                    broadcastId={liveBroadcastFor(cameraUser.username)?.id}
                     targetUser={cameraUser}
                     currentUser={session.user}
                   />

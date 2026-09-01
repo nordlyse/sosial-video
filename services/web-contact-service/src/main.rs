@@ -146,7 +146,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/broadcasts/{id}/speaking", put(broadcasts::set_speaking))
         .route("/v1/broadcasts/{id}/reactions", post(broadcasts::add_reaction))
-        .route("/v1/users/{id}/comments", get(comments::list_comments).post(comments::add_comment))
+        .route(
+            "/v1/broadcasts/{id}/comments",
+            get(comments::list_comments).post(comments::add_comment),
+        )
         .with_state(state)
         .layer(
             CorsLayer::new()

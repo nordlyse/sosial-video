@@ -145,6 +145,7 @@ pub async fn ensure_schema(pool: &deadpool_postgres::Pool) -> anyhow::Result<()>
             );
             CREATE TABLE IF NOT EXISTS camera_comments (
                 id               SERIAL PRIMARY KEY,
+                broadcast_id     INTEGER REFERENCES broadcasts (id) ON DELETE CASCADE,
                 target_user_id   INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
                 from_user_id     INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
                 body             TEXT NOT NULL,
@@ -158,6 +159,9 @@ pub async fn ensure_schema(pool: &deadpool_postgres::Pool) -> anyhow::Result<()>
             ALTER TABLE camera_comments ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES camera_comments (id) ON DELETE CASCADE;
             ALTER TABLE camera_comments ADD COLUMN IF NOT EXISTS is_private BOOLEAN NOT NULL DEFAULT false;
             ALTER TABLE camera_comments ADD COLUMN IF NOT EXISTS reply_to_user_id INTEGER REFERENCES users (id) ON DELETE SET NULL;
+            ALTER TABLE camera_comments ADD COLUMN IF NOT EXISTS broadcast_id INTEGER REFERENCES broadcasts (id) ON DELETE CASCADE;
+            CREATE INDEX IF NOT EXISTS camera_comments_broadcast_idx
+                ON camera_comments (broadcast_id, created_at DESC);
             CREATE TABLE IF NOT EXISTS broadcast_reactions (
                 id           SERIAL PRIMARY KEY,
                 broadcast_id INTEGER NOT NULL REFERENCES broadcasts (id) ON DELETE CASCADE,

@@ -218,12 +218,12 @@ export function setSpeaking(token, broadcastId, speaking) {
   });
 }
 
-export function fetchComments(token, userId) {
-  return request(`/v1/users/${userId}/comments`, { token });
+export function fetchComments(token, broadcastId) {
+  return request(`/v1/broadcasts/${broadcastId}/comments`, { token });
 }
 
-export function postComment(token, userId, body, extra = {}) {
-  return request(`/v1/users/${userId}/comments`, {
+export function postComment(token, broadcastId, body, extra = {}) {
+  return request(`/v1/broadcasts/${broadcastId}/comments`, {
     method: "POST",
     token,
     body: {

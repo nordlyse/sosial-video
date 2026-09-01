@@ -3,24 +3,27 @@ import { fetchComments, postComment } from "./api.js";
 
 const EXPANDED_KEY = "sosial-video-comments-expanded";
 
-export default function CommentsPanel({ token, targetUser, currentUser, compact }) {
+export default function CommentsPanel({ token, broadcastId, targetUser, currentUser, compact }) {
   const [comments, setComments] = useState([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [expanded, setExpanded] = useState(readExpanded);
+  const [expanded, setExpanded] = useState(() => (compact ? false : readExpanded()));
   const [composer, setComposer] = useState(null);
   const listRef = useRef(null);
   const isOwner = currentUser?.id === targetUser?.id;
 
   useEffect(() => {
-    if (!token || !targetUser?.id) {
+    setComments([]);
+    setComposer(null);
+    setDraft("");
+    if (!token || !broadcastId) {
       return undefined;
     }
     let cancelled = false;
     async function refresh() {
       try {
-        const list = await fetchComments(token, targetUser.id);
+        const list = await fetchComments(token, broadcastId);
         if (!cancelled) {
           setComments(list);
           setError("");
@@ -37,7 +40,7 @@ export default function CommentsPanel({ token, targetUser, currentUser, compact 
       cancelled = true;
       clearInterval(timer);
     };
-  }, [token, targetUser?.id]);
+  }, [token, broadcastId]);
 
   useEffect(() => {
     const node = listRef.current;
@@ -49,7 +52,9 @@ export default function CommentsPanel({ token, targetUser, currentUser, compact 
   function toggleExpanded() {
     setExpanded((prev) => {
       const next = !prev;
-      writeExpanded(next);
+      if (!compact) {
+        writeExpanded(next);
+      }
       return next;
     });
   }
@@ -57,12 +62,12 @@ export default function CommentsPanel({ token, targetUser, currentUser, compact 
   async function handleSubmit(event) {
     event.preventDefault();
     const body = draft.trim();
-    if (!body || busy) {
+    if (!body || busy || !broadcastId) {
       return;
     }
     setBusy(true);
     try {
-      const created = await postComment(token, targetUser.id, body, {
+      const created = await postComment(token, broadcastId, body, {
         parentId: composer?.parent.id,
         isPrivate: composer?.mode === "private",
       });
@@ -108,7 +113,11 @@ export default function CommentsPanel({ token, targetUser, currentUser, compact 
         </button>
       </div>
       <div className="comment-list" ref={listRef}>
-        {roots.length === 0 ? <p className="hint">No comments yet.</p> : null}
+        {roots.length === 0 ? (
+          <p className="hint">
+            {broadcastId ? "No comments yet." : "Comments start fresh with each new broadcast."}
+          </p>
+        ) : null}
         {roots.map((comment) => (
           <CommentThread
             key={comment.id}
@@ -142,10 +151,11 @@ export default function CommentsPanel({ token, targetUser, currentUser, compact 
           value={draft}
           maxLength={280}
           rows={compact ? 2 : 3}
-          placeholder={placeholderFor(composer)}
+          placeholder={broadcastId ? placeholderFor(composer) : "Start a broadcast to comment."}
           onChange={(event) => setDraft(event.target.value)}
+          disabled={!broadcastId}
         />
-        <button type="submit" className="glow-button" disabled={busy || !draft.trim()}>
+        <button type="submit" className="glow-button" disabled={busy || !broadcastId || !draft.trim()}>
           {busy ? "Sending..." : composer?.mode === "private" ? "Send privately" : "Send"}
         </button>
       </form>

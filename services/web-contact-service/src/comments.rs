@@ -28,20 +28,40 @@ pub struct CommentRequest {
     is_private: bool,
 }
 
+async fn broadcast_host(
+    client: &tokio_postgres::Client,
+    broadcast_id: i32,
+) -> Result<(i32, UserView), (StatusCode, Json<crate::ErrorBody>)> {
+    let row = client
+        .query_opt(
+            "SELECT u.id, u.username
+             FROM broadcasts b
+             JOIN users u ON u.id = b.host_user_id
+             WHERE b.id = $1",
+            &[&broadcast_id],
+        )
+        .await
+        .map_err(internal)?;
+    let Some(row) = row else {
+        return Err(error(StatusCode::NOT_FOUND, "broadcast not found"));
+    };
+    Ok((
+        row.get(0),
+        UserView {
+            id: row.get(0),
+            username: row.get(1),
+        },
+    ))
+}
+
 pub async fn list_comments(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(user_id): Path<i32>,
+    Path(broadcast_id): Path<i32>,
 ) -> Result<Json<Vec<CommentView>>, (StatusCode, Json<crate::ErrorBody>)> {
     let (viewer, _) = current_user(&state, &headers).await?;
     let client = state.pool.get().await.map_err(internal)?;
-    let exists = client
-        .query_opt("SELECT 1 FROM users WHERE id = $1", &[&user_id])
-        .await
-        .map_err(internal)?;
-    if exists.is_none() {
-        return Err(error(StatusCode::NOT_FOUND, "user not found"));
-    }
+    let (host_id, _) = broadcast_host(&client, broadcast_id).await?;
     let rows = client
         .query(
             "SELECT c.id, c.body, u.id, u.username, c.created_at,
@@ -49,16 +69,16 @@ pub async fn list_comments(
              FROM camera_comments c
              JOIN users u ON u.id = c.from_user_id
              LEFT JOIN users r ON r.id = c.reply_to_user_id
-             WHERE c.target_user_id = $1
+             WHERE c.broadcast_id = $1
                AND (
                     c.is_private = false
                     OR c.from_user_id = $2
                     OR c.reply_to_user_id = $2
-                    OR c.target_user_id = $2
+                    OR $2 = $3
                )
              ORDER BY c.created_at ASC
              LIMIT 200",
-            &[&user_id, &viewer.id],
+            &[&broadcast_id, &viewer.id, &host_id],
         )
         .await
         .map_err(internal)?;
@@ -93,7 +113,7 @@ pub async fn list_comments(
 pub async fn add_comment(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(user_id): Path<i32>,
+    Path(broadcast_id): Path<i32>,
     Json(body): Json<CommentRequest>,
 ) -> Result<Json<CommentView>, (StatusCode, Json<crate::ErrorBody>)> {
     let text = body.body.trim().to_string();
@@ -108,13 +128,7 @@ pub async fn add_comment(
     }
     let (user, _) = current_user(&state, &headers).await?;
     let client = state.pool.get().await.map_err(internal)?;
-    let exists = client
-        .query_opt("SELECT 1 FROM users WHERE id = $1", &[&user_id])
-        .await
-        .map_err(internal)?;
-    if exists.is_none() {
-        return Err(error(StatusCode::NOT_FOUND, "user not found"));
-    }
+    let (host_id, _) = broadcast_host(&client, broadcast_id).await?;
 
     let parent_id = body.parent_id;
     let mut reply_to_user_id: Option<i32> = None;
@@ -122,7 +136,7 @@ pub async fn add_comment(
     if let Some(pid) = parent_id {
         let parent = client
             .query_opt(
-                "SELECT from_user_id, target_user_id, u.username
+                "SELECT from_user_id, broadcast_id, u.username
                  FROM camera_comments c
                  JOIN users u ON u.id = c.from_user_id
                  WHERE c.id = $1",
@@ -133,8 +147,8 @@ pub async fn add_comment(
         let Some(parent) = parent else {
             return Err(error(StatusCode::NOT_FOUND, "comment not found"));
         };
-        let parent_target: i32 = parent.get(1);
-        if parent_target != user_id {
+        let parent_broadcast: Option<i32> = parent.get(1);
+        if parent_broadcast != Some(broadcast_id) {
             return Err(error(StatusCode::BAD_REQUEST, "comment does not belong here"));
         }
         let from_id: i32 = parent.get(0);
@@ -152,7 +166,7 @@ pub async fn add_comment(
     }
 
     let is_private = body.is_private;
-    if is_private && user.id != user_id {
+    if is_private && user.id != host_id {
         return Err(error(
             StatusCode::FORBIDDEN,
             "only the camera owner can send a private reply",
@@ -162,11 +176,12 @@ pub async fn add_comment(
     let row = client
         .query_one(
             "INSERT INTO camera_comments
-                (target_user_id, from_user_id, body, parent_id, is_private, reply_to_user_id)
-             VALUES ($1, $2, $3, $4, $5, $6)
+                (broadcast_id, target_user_id, from_user_id, body, parent_id, is_private, reply_to_user_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              RETURNING id, created_at",
             &[
-                &user_id,
+                &broadcast_id,
+                &host_id,
                 &user.id,
                 &text,
                 &parent_id,
