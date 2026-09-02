@@ -150,7 +150,7 @@ export default function CommentsPanel({ token, broadcastId, targetUser, currentU
         <textarea
           value={draft}
           maxLength={280}
-          rows={compact ? 2 : 3}
+          rows={compact ? 1 : 3}
           placeholder={broadcastId ? placeholderFor(composer) : "Start a broadcast to comment."}
           onChange={(event) => setDraft(event.target.value)}
           disabled={!broadcastId}
