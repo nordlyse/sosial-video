@@ -2,6 +2,10 @@ export async function drawVideoWithWebGpu(canvas, video, onReady) {
   if (!navigator.gpu) {
     return false;
   }
+  const ua = navigator.userAgent || "";
+  if (/iPhone|iPad|iPod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) {
+    return false;
+  }
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) {
     return false;

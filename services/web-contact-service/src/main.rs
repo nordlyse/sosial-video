@@ -1,3 +1,4 @@
+mod auth;
 mod broadcasts;
 mod comments;
 
@@ -31,14 +32,26 @@ const SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const ONLINE_WINDOW: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
+pub struct SmtpSettings {
+    pub host: Option<String>,
+    pub port: u16,
+    pub from: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub pool: Pool,
+    pub public_app_url: String,
+    pub smtp: SmtpSettings,
 }
 
 #[derive(Deserialize)]
 struct LoginRequest {
     username: String,
     password: String,
+    locale: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -57,6 +70,7 @@ struct LoginResponse {
 struct PresenceRequest {
     ip_address: Option<String>,
     port: Option<i32>,
+    locale: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -85,17 +99,39 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = make_pool()?;
     wait_for_db(&pool).await?;
+    auth::ensure_schema(&pool).await?;
     seed_test_users(&pool).await?;
     broadcasts::ensure_schema(&pool).await?;
 
+    let state = AppState {
+        pool,
+        public_app_url: std::env::var("PUBLIC_APP_URL")
+            .unwrap_or_else(|_| "http://localhost:3000".into()),
+        smtp: SmtpSettings {
+            host: std::env::var("SMTP_HOST").ok().filter(|s| !s.is_empty()),
+            port: std::env::var("SMTP_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(1025),
+            from: std::env::var("SMTP_FROM")
+                .unwrap_or_else(|_| "Sosial Video <noreply@sosial.local>".into()),
+            username: std::env::var("SMTP_USER").ok().filter(|s| !s.is_empty()),
+            password: std::env::var("SMTP_PASSWORD").ok().filter(|s| !s.is_empty()),
+        },
+    };
+
     let app = Router::new()
         .route("/health", get(health))
+        .route("/v1/register", post(auth::register))
+        .route("/v1/verify", post(auth::verify_submit))
+        .route("/v1/verify/{token}", get(auth::verify_click))
         .route("/v1/login", post(login))
         .route("/v1/logout", post(logout))
         .route("/v1/me", get(me))
         .route("/v1/presence", put(presence))
         .route("/v1/contacts", get(contacts))
         .route("/v1/studio", get(broadcasts::studio))
+        .route("/v1/public-broadcasts", get(broadcasts::public_broadcasts))
         .route("/v1/broadcasts", post(broadcasts::start_broadcast))
         .route("/v1/broadcasts/current/end", post(broadcasts::end_broadcast))
         .route("/v1/broadcasts/current/leave", post(broadcasts::leave_broadcast))
@@ -110,8 +146,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/broadcasts/{id}/speaking", put(broadcasts::set_speaking))
         .route("/v1/broadcasts/{id}/reactions", post(broadcasts::add_reaction))
-        .route("/v1/users/{id}/comments", get(comments::list_comments).post(comments::add_comment))
-        .with_state(AppState { pool })
+        .route(
+            "/v1/broadcasts/{id}/comments",
+            get(comments::list_comments).post(comments::add_comment),
+        )
+        .with_state(state)
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -172,14 +211,23 @@ async fn seed_test_users(pool: &Pool) -> anyhow::Result<()> {
             )
             .await?
             .get(0);
+        let email = format!("{username}@test.sosial.local");
         if exists {
+            client
+                .execute(
+                    "UPDATE users SET status = 'active', email = COALESCE(email, $2)
+                     WHERE username = $1",
+                    &[&username, &email],
+                )
+                .await?;
             continue;
         }
         let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)?;
         client
             .execute(
-                "INSERT INTO users (username, password_hash) VALUES ($1, $2)",
-                &[&username, &hash],
+                "INSERT INTO users (username, password_hash, email, status)
+                 VALUES ($1, $2, $3, 'active')",
+                &[&username, &hash, &email],
             )
             .await?;
         tracing::info!("seeded test user {username}");
@@ -210,7 +258,9 @@ async fn login(
     let client = state.pool.get().await.map_err(internal)?;
     let row = client
         .query_opt(
-            "SELECT id, password_hash FROM users WHERE username = $1",
+            "SELECT id, username, password_hash, COALESCE(status, 'active')
+             FROM users
+             WHERE lower(username) = lower($1)",
             &[&username],
         )
         .await
@@ -220,11 +270,15 @@ async fn login(
         return Err(error(StatusCode::UNAUTHORIZED, "invalid credentials"));
     };
     let user_id: i32 = row.get(0);
-    let password_hash: String = row.get(1);
+    let stored_username: String = row.get(1);
+    let password_hash: String = row.get(2);
+    let status: String = row.get(3);
     let ok = bcrypt::verify(&body.password, &password_hash).map_err(internal)?;
     if !ok {
         return Err(error(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
+    ensure_login_allowed(&client, user_id, &status).await?;
+    store_locale(&client, user_id, body.locale.as_deref(), &headers).await?;
 
     let token = Uuid::new_v4();
     let expires = SystemTime::now() + SESSION_TTL;
@@ -245,9 +299,51 @@ async fn login(
         token,
         user: UserView {
             id: user_id,
-            username,
+            username: stored_username,
         },
     }))
+}
+
+async fn ensure_login_allowed(
+    client: &deadpool_postgres::Object,
+    user_id: i32,
+    status: &str,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    if status == "active" {
+        return Ok(());
+    }
+    let row = client
+        .query_opt(
+            "SELECT expires_at FROM email_verifications
+             WHERE user_id = $1 AND used_at IS NULL
+             ORDER BY expires_at DESC
+             LIMIT 1",
+            &[&user_id],
+        )
+        .await
+        .map_err(internal)?;
+    let expired = row
+        .map(|row| {
+            let expires_at: SystemTime = row.get(0);
+            expires_at < SystemTime::now()
+        })
+        .unwrap_or(true);
+    if status == "expired" || expired {
+        let _ = client
+            .execute(
+                "UPDATE users SET status = 'expired' WHERE id = $1 AND status = 'pending'",
+                &[&user_id],
+            )
+            .await;
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "this sign-up expired. Register a new account.",
+        ));
+    }
+    Err(error(
+        StatusCode::FORBIDDEN,
+        "confirm your email first. Click the link we sent; it is valid for 1 day.",
+    ))
 }
 
 async fn logout(
@@ -287,6 +383,7 @@ async fn presence(
     upsert_contact(&client, user.id, Some(ip), body.port)
         .await
         .map_err(internal)?;
+    store_locale(&client, user.id, body.locale.as_deref(), &headers).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -301,6 +398,7 @@ async fn contacts(
             "SELECT u.id, u.username, c.ip_address, c.port, c.last_seen
              FROM users u
              LEFT JOIN contacts c ON c.user_id = u.id
+             WHERE COALESCE(u.status, 'active') = 'active'
              ORDER BY u.username",
             &[],
         )
@@ -337,7 +435,7 @@ pub async fn current_user(
     let client = state.pool.get().await.map_err(internal)?;
     let row = client
         .query_opt(
-            "SELECT u.id, u.username, s.expires_at
+            "SELECT u.id, u.username, s.expires_at, COALESCE(u.status, 'active')
              FROM sessions s
              JOIN users u ON u.id = s.user_id
              WHERE s.token = $1",
@@ -349,11 +447,15 @@ pub async fn current_user(
         return Err(error(StatusCode::UNAUTHORIZED, "invalid session"));
     };
     let expires: SystemTime = row.get(2);
+    let status: String = row.get(3);
     if expires < SystemTime::now() {
         let _ = client
             .execute("DELETE FROM sessions WHERE token = $1", &[&token])
             .await;
         return Err(error(StatusCode::UNAUTHORIZED, "session expired"));
+    }
+    if status != "active" {
+        return Err(error(StatusCode::FORBIDDEN, "account is not active"));
     }
     Ok((
         UserView {
@@ -393,6 +495,45 @@ fn bearer_token(headers: &HeaderMap) -> Result<Uuid, (StatusCode, Json<ErrorBody
         .strip_prefix("Bearer ")
         .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "invalid authorization"))?;
     Uuid::parse_str(token).map_err(|_| error(StatusCode::UNAUTHORIZED, "invalid token"))
+}
+
+async fn store_locale(
+    client: &deadpool_postgres::Object,
+    user_id: i32,
+    raw: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ErrorBody>)> {
+    let locale = normalize_locale(raw, headers);
+    client
+        .execute(
+            "UPDATE users SET locale = $2 WHERE id = $1",
+            &[&user_id, &locale],
+        )
+        .await
+        .map_err(internal)?;
+    Ok(())
+}
+
+pub fn normalize_locale(raw: Option<&str>, headers: &HeaderMap) -> String {
+    let header = headers
+        .get("accept-language")
+        .and_then(|value| value.to_str().ok());
+    let source = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(header);
+    let primary = source
+        .unwrap_or("en")
+        .split([',', ';', '-', '_'])
+        .next()
+        .unwrap_or("en")
+        .trim()
+        .to_lowercase();
+    if primary.is_empty() || primary.len() > 8 {
+        "en".into()
+    } else {
+        primary
+    }
 }
 
 fn client_ip(headers: &HeaderMap, addr: SocketAddr) -> String {

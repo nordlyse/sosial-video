@@ -7,7 +7,7 @@ use std::{
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
 };
@@ -45,11 +45,13 @@ use webrtc::{
 struct Publisher {
     video: Option<Arc<TrackLocalStaticRTP>>,
     audio: Option<Arc<TrackLocalStaticRTP>>,
+    peer: Option<Arc<RTCPeerConnection>>,
 }
 
 #[derive(Clone, Default)]
 struct Room {
     publishers: HashMap<String, Publisher>,
+    connections: Vec<Arc<RTCPeerConnection>>,
 }
 
 #[derive(Clone)]
@@ -66,6 +68,7 @@ struct SdpRequest {
     sdp_type: String,
     sdp: String,
     peer_id: Option<String>,
+    client_host: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -108,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         udp_port_max: env_u16("WEBRTC_UDP_PORT_MAX", 40031),
         announced_ip: std::env::var("WEBRTC_ANNOUNCED_IP")
             .ok()
+            .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
     };
 
@@ -169,6 +173,7 @@ async fn room_status(State(state): State<AppState>, Path(room): Path<String>) ->
 async fn publish(
     State(state): State<AppState>,
     Path(room): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<SdpRequest>,
 ) -> Result<Json<SdpResponse>, (StatusCode, Json<ErrorBody>)> {
     let peer_id = body
@@ -179,23 +184,17 @@ async fn publish(
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "peer_id is required"))?
         .to_string();
     let offer = offer_from_body(&body)?;
-    let peer = new_peer_connection(&state).await.map_err(internal)?;
-
-    peer.add_transceiver_from_kind(RTPCodecType::Video, None)
-        .await
-        .map_err(internal)?;
-    peer.add_transceiver_from_kind(RTPCodecType::Audio, None)
+    let announce = announce_ips(&state, &headers, body.client_host.as_deref());
+    let peer = new_peer_connection(&state, &announce)
         .await
         .map_err(internal)?;
 
     {
         let mut rooms = state.rooms.lock().await;
-        rooms
-            .entry(room.clone())
-            .or_default()
-            .publishers
-            .entry(peer_id.clone())
-            .or_default();
+        let room_state = rooms.entry(room.clone()).or_default();
+        let publisher = room_state.publishers.entry(peer_id.clone()).or_default();
+        publisher.peer = Some(Arc::clone(&peer));
+        room_state.connections.push(Arc::clone(&peer));
     }
 
     let rooms = state.rooms.clone();
@@ -282,6 +281,7 @@ async fn publish(
     let rooms = state.rooms.clone();
     let room_name = room.clone();
     let publisher_id = peer_id.clone();
+    let this_peer = Arc::clone(&peer);
     peer.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
         tracing::info!("publisher {publisher_id} state: {s}");
         if matches!(
@@ -291,10 +291,19 @@ async fn publish(
             let rooms = rooms.clone();
             let room_name = room_name.clone();
             let publisher_id = publisher_id.clone();
+            let this_peer = Arc::clone(&this_peer);
             tokio::spawn(async move {
                 let mut rooms = rooms.lock().await;
                 if let Some(room) = rooms.get_mut(&room_name) {
-                    room.publishers.remove(&publisher_id);
+                    let is_current = room
+                        .publishers
+                        .get(&publisher_id)
+                        .and_then(|publisher| publisher.peer.as_ref())
+                        .map(|current| Arc::ptr_eq(current, &this_peer))
+                        .unwrap_or(false);
+                    if is_current {
+                        room.publishers.remove(&publisher_id);
+                    }
                 }
             });
         }
@@ -307,20 +316,34 @@ async fn publish(
 async fn subscribe(
     State(state): State<AppState>,
     Path((room, peer_id)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(body): Json<SdpRequest>,
 ) -> Result<Json<SdpResponse>, (StatusCode, Json<ErrorBody>)> {
     let offer = offer_from_body(&body)?;
-    let publisher = {
+    let (video, audio) = {
         let rooms = state.rooms.lock().await;
         rooms
             .get(&room)
-            .and_then(|current| current.publishers.get(&peer_id).cloned())
-            .unwrap_or_default()
+            .and_then(|current| current.publishers.get(&peer_id))
+            .map(|publisher| (publisher.video.clone(), publisher.audio.clone()))
+            .unwrap_or((None, None))
     };
 
-    let peer = new_peer_connection(&state).await.map_err(internal)?;
-    add_local_track(&peer, publisher.video).await?;
-    add_local_track(&peer, publisher.audio).await?;
+    let announce = announce_ips(&state, &headers, body.client_host.as_deref());
+    let peer = new_peer_connection(&state, &announce)
+        .await
+        .map_err(internal)?;
+    add_local_track(&peer, video).await?;
+    add_local_track(&peer, audio).await?;
+
+    {
+        let mut rooms = state.rooms.lock().await;
+        rooms
+            .entry(room.clone())
+            .or_default()
+            .connections
+            .push(Arc::clone(&peer));
+    }
 
     peer.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
         tracing::info!("subscriber for {peer_id} state: {s}");
@@ -348,7 +371,10 @@ async fn add_local_track(
     Ok(())
 }
 
-async fn new_peer_connection(state: &AppState) -> anyhow::Result<Arc<RTCPeerConnection>> {
+async fn new_peer_connection(
+    state: &AppState,
+    announce: &[String],
+) -> anyhow::Result<Arc<RTCPeerConnection>> {
     let mut media = MediaEngine::default();
     media.register_default_codecs()?;
 
@@ -361,8 +387,9 @@ async fn new_peer_connection(state: &AppState) -> anyhow::Result<Arc<RTCPeerConn
         state.udp_port_max,
     )?));
     settings.set_include_loopback_candidate(true);
-    if let Some(ip) = &state.announced_ip {
-        settings.set_nat_1to1_ips(vec![ip.clone()], RTCIceCandidateType::Host);
+    if !announce.is_empty() {
+        tracing::info!("ICE host candidates: {announce:?}");
+        settings.set_nat_1to1_ips(announce.to_vec(), RTCIceCandidateType::Host);
     }
 
     let api = APIBuilder::new()
@@ -399,6 +426,66 @@ async fn answer_offer(
         sdp_type: "answer".to_string(),
         sdp: local.sdp,
     }))
+}
+
+fn announce_ips(state: &AppState, headers: &HeaderMap, client_host: Option<&str>) -> Vec<String> {
+    let mut ips = Vec::new();
+    push_host_ip(&mut ips, client_host);
+    push_host_ip(
+        &mut ips,
+        headers
+            .get("x-forwarded-host")
+            .and_then(|value| value.to_str().ok()),
+    );
+    push_host_ip(
+        &mut ips,
+        headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok()),
+    );
+    push_host_ip(&mut ips, state.announced_ip.as_deref());
+    if ips.iter().any(|ip| !is_loopback(ip)) {
+        ips.retain(|ip| !is_loopback(ip));
+    }
+    ips
+}
+
+fn push_host_ip(ips: &mut Vec<String>, raw: Option<&str>) {
+    let Some(raw) = raw else {
+        return;
+    };
+    let host = raw
+        .split(',')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let host = host.rsplit_once(']').map(|(h, _)| h).unwrap_or(host);
+    let host = if host.matches('.').count() == 3 {
+        host.split(':').next().unwrap_or(host)
+    } else {
+        host
+    };
+    let host = host.trim();
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        return;
+    }
+    if !is_ip_literal(host) || ips.iter().any(|existing| existing == host) {
+        return;
+    }
+    ips.push(host.to_string());
+}
+
+fn is_loopback(ip: &str) -> bool {
+    ip == "127.0.0.1" || ip == "::1" || ip.starts_with("127.")
+}
+
+fn is_ip_literal(value: &str) -> bool {
+    if value.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    value.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
 fn offer_from_body(body: &SdpRequest) -> Result<RTCSessionDescription, (StatusCode, Json<ErrorBody>)> {
