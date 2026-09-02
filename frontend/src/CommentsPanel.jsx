@@ -3,12 +3,24 @@ import { fetchComments, postComment } from "./api.js";
 
 const EXPANDED_KEY = "sosial-video-comments-expanded";
 
-export default function CommentsPanel({ token, broadcastId, targetUser, currentUser, compact }) {
+export default function CommentsPanel({
+  token,
+  broadcastId,
+  targetUser,
+  currentUser,
+  compact,
+  defaultExpanded,
+}) {
   const [comments, setComments] = useState([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [expanded, setExpanded] = useState(() => (compact ? true : readExpanded()));
+  const [expanded, setExpanded] = useState(() => {
+    if (typeof defaultExpanded === "boolean") {
+      return defaultExpanded;
+    }
+    return compact ? true : readExpanded();
+  });
   const [composer, setComposer] = useState(null);
   const listRef = useRef(null);
   const isOwner = currentUser?.id === targetUser?.id;
@@ -52,7 +64,7 @@ export default function CommentsPanel({ token, broadcastId, targetUser, currentU
   function toggleExpanded() {
     setExpanded((prev) => {
       const next = !prev;
-      if (!compact) {
+      if (!compact && typeof defaultExpanded !== "boolean") {
         writeExpanded(next);
       }
       return next;

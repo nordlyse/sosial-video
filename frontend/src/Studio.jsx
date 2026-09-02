@@ -44,6 +44,7 @@ export default function Studio({ session, onLogout }) {
   const [localStream, setLocalStream] = useState(null);
   const [remoteStreams, setRemoteStreams] = useState({});
   const [lobbyTab, setLobbyTab] = useState("camera");
+  const [lobbyMenuOpen, setLobbyMenuOpen] = useState(false);
   const [cameraUser, setCameraUser] = useState(() => session.user);
   const [titleDraft, setTitleDraft] = useState("");
   const [publicQuery, setPublicQuery] = useState("");
@@ -480,9 +481,15 @@ export default function Studio({ session, onLogout }) {
     }
   }
 
+  function selectLobbyTab(tab) {
+    setLobbyTab(tab);
+    setLobbyMenuOpen(false);
+  }
+
   function openCameraPage(user) {
     setCameraUser(user);
     setLobbyTab("camera");
+    setLobbyMenuOpen(false);
   }
 
   const speaker =
@@ -721,35 +728,67 @@ export default function Studio({ session, onLogout }) {
 
       {!inCall ? (
         <>
-          <nav className="lobby-tabs" aria-label="Studio sections">
-            <button
-              type="button"
-              className={lobbyTab === "public" ? "active" : ""}
-              onClick={() => setLobbyTab("public")}
-            >
-              Public
-            </button>
-            <button
-              type="button"
-              className={lobbyTab === "live" ? "active" : ""}
-              onClick={() => setLobbyTab("live")}
-            >
-              Live broadcasts
-            </button>
-            <button
-              type="button"
-              className={lobbyTab === "camera" ? "active" : ""}
-              onClick={() => setLobbyTab("camera")}
-            >
-              Camera
-            </button>
-            <button
-              type="button"
-              className={lobbyTab === "contacts" ? "active" : ""}
-              onClick={() => setLobbyTab("contacts")}
-            >
-              Contacts
-            </button>
+          <nav className={`lobby-nav ${lobbyMenuOpen ? "open" : ""}`} aria-label="Studio sections">
+            <div className="lobby-nav-bar">
+              <button
+                type="button"
+                className="hamburger"
+                aria-label={lobbyMenuOpen ? "Close menu" : "Open menu"}
+                aria-expanded={lobbyMenuOpen}
+                onClick={() => setLobbyMenuOpen((open) => !open)}
+              >
+                <span />
+                <span />
+                <span />
+              </button>
+              <strong className="lobby-nav-current">
+                {lobbyTab === "public"
+                  ? "Public"
+                  : lobbyTab === "live"
+                    ? "Live broadcasts"
+                    : lobbyTab === "contacts"
+                      ? "Contacts"
+                      : "Camera"}
+              </strong>
+            </div>
+            {lobbyMenuOpen ? (
+              <button
+                type="button"
+                className="lobby-menu-backdrop"
+                aria-label="Close menu"
+                onClick={() => setLobbyMenuOpen(false)}
+              />
+            ) : null}
+            <div className="lobby-tabs">
+              <button
+                type="button"
+                className={lobbyTab === "public" ? "active" : ""}
+                onClick={() => selectLobbyTab("public")}
+              >
+                Public
+              </button>
+              <button
+                type="button"
+                className={lobbyTab === "live" ? "active" : ""}
+                onClick={() => selectLobbyTab("live")}
+              >
+                Live broadcasts
+              </button>
+              <button
+                type="button"
+                className={lobbyTab === "camera" ? "active" : ""}
+                onClick={() => selectLobbyTab("camera")}
+              >
+                Camera
+              </button>
+              <button
+                type="button"
+                className={lobbyTab === "contacts" ? "active" : ""}
+                onClick={() => selectLobbyTab("contacts")}
+              >
+                Contacts
+              </button>
+            </div>
           </nav>
           <section className={`lobby-panel tab-${lobbyTab}`}>
             {lobbyTab === "public" ? (
@@ -834,6 +873,7 @@ export default function Studio({ session, onLogout }) {
                     broadcastId={liveBroadcastFor(cameraUser.username)?.id}
                     targetUser={cameraUser}
                     currentUser={session.user}
+                    defaultExpanded={false}
                   />
                 </div>
               </div>
