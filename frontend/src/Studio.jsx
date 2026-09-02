@@ -313,10 +313,32 @@ export default function Studio({ session, onLogout }) {
   }
 
   function stopCamera() {
+    if (publishPcRef.current) {
+      publishPcRef.current.close();
+      publishPcRef.current = null;
+    }
+    publishKeyRef.current = "";
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
       localStreamRef.current = null;
-      setLocalStream(null);
+    }
+    setLocalStream(null);
+  }
+
+  async function handleToggleCamera() {
+    unlockMediaPlayback();
+    try {
+      if (localStreamRef.current) {
+        stopCamera();
+        setStatus(inCall ? "Camera is off. You are still in the room." : "Camera is off.");
+        return;
+      }
+      await openCamera();
+      if (inCall) {
+        setStatus("Sending camera to the room...");
+      }
+    } catch (err) {
+      setStatus(err.message);
     }
   }
 
@@ -353,21 +375,6 @@ export default function Studio({ session, onLogout }) {
     onLogout();
   }
 
-  async function handleSendCamera() {
-    unlockMediaPlayback();
-    try {
-      if (!localStreamRef.current) {
-        await openCamera();
-        return;
-      }
-      publishKeyRef.current = "";
-      setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
-      setStatus("Sending camera to the room...");
-    } catch (err) {
-      setStatus(err.message);
-    }
-  }
-
   async function openCamera() {
     setStatus("");
     try {
@@ -375,7 +382,7 @@ export default function Studio({ session, onLogout }) {
       localStreamRef.current = stream;
       setLocalStream(stream);
       unlockMediaPlayback();
-      setStatus("Camera is on. Start a broadcast or ask to join one.");
+      setStatus("Camera is on. Tap the button again to turn it off.");
       setLobbyTab("camera");
       setCameraUser(session.user);
       return stream;
@@ -579,8 +586,8 @@ export default function Studio({ session, onLogout }) {
           </h1>
         </div>
         <div className="header-actions">
-          <button type="button" className="glow-button" onClick={inCall ? handleSendCamera : openCamera}>
-            {inCall ? (localStream ? "Resend camera" : "Send camera") : localStream ? "Camera on" : "Open camera"}
+          <button type="button" className="glow-button" onClick={handleToggleCamera}>
+            {localStream ? "Turn camera off" : inCall ? "Send camera" : "Open camera"}
           </button>
           {hostView ? (
             <button type="button" className="ghost" onClick={handleEndBroadcast}>
