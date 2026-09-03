@@ -28,7 +28,7 @@ Services must be built with Docker and usable through Docker Compose.
 | `frontend-db` | PostgreSQL 17. Users, sessions, and IP records. | localhost:5432 |
 | `web-contact-service` | Shared Rust service that stores how users find each other's IP addresses. Login and registration go through this service. | http://localhost:8081 |
 | `mailpit` | Local inbox for confirmation emails (development). | http://localhost:8025 |
-| `webrtc-service` | Shared Rust SFU that distributes all video. Media goes through this service so many viewers do not congest a mesh. | http://localhost:8082 and UDP 40000-40031 |
+| `webrtc-service` | Shared Rust SFU that distributes all video. Media goes through this service so many viewers do not congest a mesh. | http://localhost:8082 and UDP 40000-40199 |
 | `caddy` | HTTPS reverse proxy so phones can use the camera and watch live video. | https://localhost:8443 |
 
 ## How to run

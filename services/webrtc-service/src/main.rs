@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
         udp_port_min: env_u16("WEBRTC_UDP_PORT_MIN", 40000),
-        udp_port_max: env_u16("WEBRTC_UDP_PORT_MAX", 40031),
+        udp_port_max: env_u16("WEBRTC_UDP_PORT_MAX", 40199),
         announced_ip: std::env::var("WEBRTC_ANNOUNCED_IP")
             .ok()
             .map(|s| s.trim().to_string())
@@ -192,8 +192,13 @@ async fn publish(
     {
         let mut rooms = state.rooms.lock().await;
         let room_state = rooms.entry(room.clone()).or_default();
+        retain_live_connections(room_state);
         let publisher = room_state.publishers.entry(peer_id.clone()).or_default();
-        publisher.peer = Some(Arc::clone(&peer));
+        if let Some(old) = publisher.peer.replace(Arc::clone(&peer)) {
+            tokio::spawn(async move {
+                let _ = old.close().await;
+            });
+        }
         room_state.connections.push(Arc::clone(&peer));
     }
 
@@ -292,18 +297,25 @@ async fn publish(
             let room_name = room_name.clone();
             let publisher_id = publisher_id.clone();
             let this_peer = Arc::clone(&this_peer);
+            let should_close = s == RTCPeerConnectionState::Failed;
             tokio::spawn(async move {
-                let mut rooms = rooms.lock().await;
-                if let Some(room) = rooms.get_mut(&room_name) {
-                    let is_current = room
-                        .publishers
-                        .get(&publisher_id)
-                        .and_then(|publisher| publisher.peer.as_ref())
-                        .map(|current| Arc::ptr_eq(current, &this_peer))
-                        .unwrap_or(false);
-                    if is_current {
-                        room.publishers.remove(&publisher_id);
+                {
+                    let mut rooms = rooms.lock().await;
+                    if let Some(room) = rooms.get_mut(&room_name) {
+                        let is_current = room
+                            .publishers
+                            .get(&publisher_id)
+                            .and_then(|publisher| publisher.peer.as_ref())
+                            .map(|current| Arc::ptr_eq(current, &this_peer))
+                            .unwrap_or(false);
+                        if is_current {
+                            room.publishers.remove(&publisher_id);
+                        }
+                        retain_live_connections(room);
                     }
+                }
+                if should_close {
+                    let _ = this_peer.close().await;
                 }
             });
         }
@@ -338,19 +350,41 @@ async fn subscribe(
 
     {
         let mut rooms = state.rooms.lock().await;
-        rooms
-            .entry(room.clone())
-            .or_default()
-            .connections
-            .push(Arc::clone(&peer));
+        let room_state = rooms.entry(room.clone()).or_default();
+        retain_live_connections(room_state);
+        room_state.connections.push(Arc::clone(&peer));
     }
 
+    let dead = Arc::clone(&peer);
     peer.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
         tracing::info!("subscriber for {peer_id} state: {s}");
+        if s == RTCPeerConnectionState::Failed {
+            let dead = Arc::clone(&dead);
+            tokio::spawn(async move {
+                let _ = dead.close().await;
+            });
+        }
         Box::pin(async {})
     }));
 
     answer_offer(peer, offer).await
+}
+
+fn retain_live_connections(room: &mut Room) {
+    let mut live = Vec::with_capacity(room.connections.len());
+    for pc in room.connections.drain(..) {
+        match pc.connection_state() {
+            RTCPeerConnectionState::Failed
+            | RTCPeerConnectionState::Closed
+            | RTCPeerConnectionState::Disconnected => {
+                tokio::spawn(async move {
+                    let _ = pc.close().await;
+                });
+            }
+            _ => live.push(pc),
+        }
+    }
+    room.connections = live;
 }
 
 async fn add_local_track(

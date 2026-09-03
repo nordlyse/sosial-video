@@ -60,6 +60,7 @@ export default function Studio({ session, onLogout }) {
   const lastReactAtRef = useRef(0);
   const [reactionBurst, setReactionBurst] = useState(null);
   const syncLockRef = useRef(false);
+  const [publishRetry, setPublishRetry] = useState(0);
 
   const membership = studio.membership;
   const me = session.user.username;
@@ -147,11 +148,19 @@ export default function Studio({ session, onLogout }) {
           const key = `${publisher.peer_id}:${publisher.has_video}:${publisher.has_audio}`;
           wanted.add(publisher.peer_id);
           const current = subsRef.current.get(publisher.peer_id);
-          if (current?.key === key) {
+          const liveState = current?.pc.connectionState;
+          if (
+            current?.key === key &&
+            liveState &&
+            liveState !== "failed" &&
+            liveState !== "closed" &&
+            liveState !== "disconnected"
+          ) {
             continue;
           }
           if (current) {
             current.pc.close();
+            subsRef.current.delete(publisher.peer_id);
           }
           const pc = await subscribePeer(roomId, publisher.peer_id, (stream) => {
             setRemoteStreams((prev) => ({ ...prev, [publisher.peer_id]: stream }));
@@ -160,6 +169,22 @@ export default function Studio({ session, onLogout }) {
             pc.close();
             return;
           }
+          const dropIfDead = () => {
+            if (pc.connectionState !== "failed" && pc.connectionState !== "closed") {
+              return;
+            }
+            const held = subsRef.current.get(publisher.peer_id);
+            if (held?.pc === pc) {
+              subsRef.current.delete(publisher.peer_id);
+              try {
+                pc.close();
+              } catch {
+                // Already closed.
+              }
+            }
+          };
+          pc.addEventListener("connectionstatechange", dropIfDead);
+          pc.addEventListener("iceconnectionstatechange", dropIfDead);
           subsRef.current.set(publisher.peer_id, { pc, key });
         }
         for (const [peerId, sub] of subsRef.current) {
@@ -201,7 +226,15 @@ export default function Studio({ session, onLogout }) {
       track.enabled = true;
     });
     const key = `${roomId}:${tracks.map((track) => `${track.kind}:${track.id}`).join(",")}`;
-    if (publishKeyRef.current === key && publishPcRef.current) {
+    const liveState = publishPcRef.current?.connectionState;
+    if (
+      publishKeyRef.current === key &&
+      publishPcRef.current &&
+      liveState &&
+      liveState !== "failed" &&
+      liveState !== "closed" &&
+      liveState !== "disconnected"
+    ) {
       return undefined;
     }
     let cancelled = false;
@@ -217,6 +250,27 @@ export default function Studio({ session, onLogout }) {
           pc.close();
           return;
         }
+        let retried = false;
+        const retryIfDead = () => {
+          if (retried || publishPcRef.current !== pc) {
+            return;
+          }
+          if (pc.connectionState !== "failed" && pc.iceConnectionState !== "failed") {
+            return;
+          }
+          retried = true;
+          publishPcRef.current = null;
+          publishKeyRef.current = "";
+          try {
+            pc.close();
+          } catch {
+            // Already closed.
+          }
+          setStatus("Reconnecting camera...");
+          setPublishRetry((n) => n + 1);
+        };
+        pc.addEventListener("connectionstatechange", retryIfDead);
+        pc.addEventListener("iceconnectionstatechange", retryIfDead);
         publishPcRef.current = pc;
         publishKeyRef.current = key;
         setStatus("Camera is sending to the room.");
@@ -231,7 +285,7 @@ export default function Studio({ session, onLogout }) {
     return () => {
       cancelled = true;
     };
-  }, [roomId, localStream, me]);
+  }, [roomId, localStream, me, publishRetry]);
 
   useEffect(() => {
     if (!broadcastId || !localStream || membershipRole === "listener") {

@@ -85,7 +85,7 @@ export default function ParticipantTile({ stream, username, role, speaking, comp
         }
       }
       setGpuReady(false);
-      if (!stream || !hasVideo || !video || !canvasRef.current || isIOSDevice() || compact) {
+      if (!local || !stream || !hasVideo || !video || !canvasRef.current || isIOSDevice() || compact) {
         return;
       }
       const value = await drawVideoWithWebGpu(canvasRef.current, video, () => {
@@ -156,7 +156,7 @@ export default function ParticipantTile({ stream, username, role, speaking, comp
           Tap to play
         </button>
       ) : null}
-      {showVideo ? (
+      {showVideo && local && !compact ? (
         <canvas ref={canvasRef} className={`tile-canvas ${gpuReady ? "ready" : ""}`} />
       ) : null}
       <div className="tile-meta">
