@@ -242,6 +242,14 @@ export function sendReaction(token, broadcastId, emoji) {
   });
 }
 
+export function postTranscript(token, broadcastId, body) {
+  return request(`/v1/broadcasts/${broadcastId}/transcripts`, {
+    method: "POST",
+    token,
+    body: { body },
+  });
+}
+
 async function webrtcJson(path, body) {
   let response;
   try {

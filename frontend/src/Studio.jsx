@@ -12,6 +12,7 @@ import {
   listPublishers,
   logout,
   openUserMedia,
+  postTranscript,
   publishPeer,
   rejectJoin,
   requestJoin,
@@ -28,6 +29,7 @@ import SpotlightCard from "./bits/SpotlightCard.jsx";
 import CommentsPanel from "./CommentsPanel.jsx";
 import ParticipantTile from "./ParticipantTile.jsx";
 import ReactionOverlay, { ReactionBar } from "./ReactionOverlay.jsx";
+import { speechRecognitionSupported, startBroadcastSpeechLog } from "./speechLog.js";
 
 export default function Studio({ session, onLogout }) {
   const [contacts, setContacts] = useState([]);
@@ -61,6 +63,7 @@ export default function Studio({ session, onLogout }) {
   const [reactionBurst, setReactionBurst] = useState(null);
   const syncLockRef = useRef(false);
   const [publishRetry, setPublishRetry] = useState(0);
+  const [speechLogState, setSpeechLogState] = useState("off");
 
   const membership = studio.membership;
   const me = session.user.username;
@@ -286,6 +289,36 @@ export default function Studio({ session, onLogout }) {
       cancelled = true;
     };
   }, [roomId, localStream, me, publishRetry]);
+
+  useEffect(() => {
+    if (!broadcastId) {
+      setSpeechLogState("off");
+      return undefined;
+    }
+    if (!speechRecognitionSupported()) {
+      setSpeechLogState("unsupported");
+      return undefined;
+    }
+    let cancelled = false;
+    let stop = () => {};
+    const timer = window.setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+      stop = startBroadcastSpeechLog({
+        onFinal(text) {
+          postTranscript(session.token, broadcastId, text).catch(() => {});
+        },
+      });
+      setSpeechLogState("on");
+    }, 600);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      stop();
+      setSpeechLogState("off");
+    };
+  }, [broadcastId, session.token]);
 
   useEffect(() => {
     if (!broadcastId || !localStream || membershipRole === "listener") {
@@ -776,6 +809,13 @@ export default function Studio({ session, onLogout }) {
               currentUser={session.user}
               compact
             />
+            <p className="hint speech-log-hint">
+              {speechLogState === "on"
+                ? "Spoken words are saved with each username in this broadcast's log."
+                : speechLogState === "unsupported"
+                  ? "This browser cannot log speech. Use Chrome or Edge on HTTPS to save a transcript."
+                  : "Speech logging starts when you join the room."}
+            </p>
           </aside>
         </section>
       ) : null}

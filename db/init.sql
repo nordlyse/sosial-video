@@ -99,3 +99,16 @@ CREATE TABLE IF NOT EXISTS broadcast_reactions (
 );
 
 CREATE INDEX IF NOT EXISTS broadcast_reactions_live_idx ON broadcast_reactions (broadcast_id, created_at DESC);
+
+ALTER TABLE broadcasts ADD COLUMN IF NOT EXISTS transcript_log_path TEXT;
+
+CREATE TABLE IF NOT EXISTS broadcast_transcripts (
+    id           SERIAL PRIMARY KEY,
+    broadcast_id INTEGER NOT NULL REFERENCES broadcasts (id) ON DELETE CASCADE,
+    user_id      INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    body         TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS broadcast_transcripts_broadcast_idx
+    ON broadcast_transcripts (broadcast_id, created_at);

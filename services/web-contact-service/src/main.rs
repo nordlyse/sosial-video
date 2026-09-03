@@ -1,9 +1,12 @@
 mod auth;
 mod broadcasts;
 mod comments;
+mod transcripts;
 
 use std::{
     net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
@@ -45,6 +48,8 @@ pub struct AppState {
     pub pool: Pool,
     pub public_app_url: String,
     pub smtp: SmtpSettings,
+    pub transcript_log_dir: PathBuf,
+    pub transcript_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +107,12 @@ async fn main() -> anyhow::Result<()> {
     auth::ensure_schema(&pool).await?;
     seed_test_users(&pool).await?;
     broadcasts::ensure_schema(&pool).await?;
+    transcripts::ensure_schema(&pool).await?;
+
+    let transcript_log_dir = PathBuf::from(
+        std::env::var("TRANSCRIPT_LOG_DIR").unwrap_or_else(|_| "log".into()),
+    );
+    tokio::fs::create_dir_all(&transcript_log_dir).await?;
 
     let state = AppState {
         pool,
@@ -118,6 +129,8 @@ async fn main() -> anyhow::Result<()> {
             username: std::env::var("SMTP_USER").ok().filter(|s| !s.is_empty()),
             password: std::env::var("SMTP_PASSWORD").ok().filter(|s| !s.is_empty()),
         },
+        transcript_log_dir,
+        transcript_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     let app = Router::new()
@@ -146,6 +159,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/broadcasts/{id}/speaking", put(broadcasts::set_speaking))
         .route("/v1/broadcasts/{id}/reactions", post(broadcasts::add_reaction))
+        .route(
+            "/v1/broadcasts/{id}/transcripts",
+            post(transcripts::add_transcript),
+        )
         .route(
             "/v1/broadcasts/{id}/comments",
             get(comments::list_comments).post(comments::add_comment),
@@ -352,7 +369,11 @@ async fn logout(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let (user, token) = current_user(&state, &headers).await?;
     let client = state.pool.get().await.map_err(internal)?;
-    let _ = broadcasts::leave_live_membership(&client, user.id).await;
+    if let Ok(Some(broadcast_id)) = broadcasts::leave_live_membership(&client, user.id).await {
+        if let Err(err) = transcripts::mark_broadcast_ended(&state, &client, broadcast_id).await {
+            tracing::warn!("could not close speech log for broadcast {broadcast_id}: {err}");
+        }
+    }
     client
         .execute("DELETE FROM sessions WHERE token = $1", &[&token])
         .await

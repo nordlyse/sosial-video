@@ -521,13 +521,19 @@ pub async fn start_broadcast(
         .await
         .map_err(internal)?;
     let broadcast_id: i32 = row.get(0);
-    client
+    let _ = client
         .execute(
             "INSERT INTO broadcast_members (broadcast_id, user_id, role) VALUES ($1, $2, 'host')",
             &[&broadcast_id, &user.id],
         )
         .await
         .map_err(internal)?;
+    if let Err(err) =
+        crate::transcripts::create_broadcast_log(&state, &client, broadcast_id, &user.username, title)
+            .await
+    {
+        tracing::warn!("could not create speech log for broadcast {broadcast_id}: {err}");
+    }
 
     Ok(Json(MembershipView {
         broadcast_id,
@@ -544,14 +550,22 @@ pub async fn leave_broadcast(
 ) -> Result<StatusCode, (StatusCode, Json<crate::ErrorBody>)> {
     let (user, _) = current_user(&state, &headers).await?;
     let client = state.pool.get().await.map_err(internal)?;
-    leave_live_membership(&client, user.id).await.map_err(internal)?;
+    let ended_id = leave_live_membership(&client, user.id)
+        .await
+        .map_err(internal)?;
+    if let Some(broadcast_id) = ended_id {
+        if let Err(err) = crate::transcripts::mark_broadcast_ended(&state, &client, broadcast_id).await
+        {
+            tracing::warn!("could not close speech log for broadcast {broadcast_id}: {err}");
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn leave_live_membership(
     client: &deadpool_postgres::Object,
     user_id: i32,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<i32>> {
     let host = client
         .query_opt(
             "SELECT id FROM broadcasts WHERE host_user_id = $1 AND ended_at IS NULL",
@@ -566,7 +580,7 @@ pub async fn leave_live_membership(
                 &[&broadcast_id],
             )
             .await?;
-        return Ok(());
+        return Ok(Some(broadcast_id));
     }
     client
         .execute(
@@ -576,7 +590,7 @@ pub async fn leave_live_membership(
             &[&user_id],
         )
         .await?;
-    Ok(())
+    Ok(None)
 }
 
 pub async fn end_broadcast(
@@ -585,16 +599,26 @@ pub async fn end_broadcast(
 ) -> Result<StatusCode, (StatusCode, Json<crate::ErrorBody>)> {
     let (user, _) = current_user(&state, &headers).await?;
     let client = state.pool.get().await.map_err(internal)?;
-    let updated = client
-        .execute(
-            "UPDATE broadcasts SET ended_at = now()
-             WHERE host_user_id = $1 AND ended_at IS NULL",
+    let live = client
+        .query_opt(
+            "SELECT id FROM broadcasts WHERE host_user_id = $1 AND ended_at IS NULL",
             &[&user.id],
         )
         .await
         .map_err(internal)?;
-    if updated == 0 {
+    let Some(row) = live else {
         return Err(error(StatusCode::NOT_FOUND, "no live broadcast to end"));
+    };
+    let broadcast_id: i32 = row.get(0);
+    client
+        .execute(
+            "UPDATE broadcasts SET ended_at = now() WHERE id = $1",
+            &[&broadcast_id],
+        )
+        .await
+        .map_err(internal)?;
+    if let Err(err) = crate::transcripts::mark_broadcast_ended(&state, &client, broadcast_id).await {
+        tracing::warn!("could not close speech log for broadcast {broadcast_id}: {err}");
     }
     Ok(StatusCode::NO_CONTENT)
 }

@@ -26,10 +26,12 @@ Services must be built with Docker and usable through Docker Compose.
 | --- | --- | --- |
 | `frontend` | React UI. Sign in or register an account (email confirmation within 1 day). Frames are drawn with WebGPU. | http://localhost:3000 |
 | `frontend-db` | PostgreSQL 17. Users, sessions, and IP records. | localhost:5432 |
-| `web-contact-service` | Shared Rust service that stores how users find each other's IP addresses. Login and registration go through this service. | http://localhost:8081 |
+| `web-contact-service` | Shared Rust service that stores how users find each other's IP addresses. Login, registration, comments, and speech logs go through this service. | http://localhost:8081 |
 | `mailpit` | Local inbox for confirmation emails (development). | http://localhost:8025 |
 | `webrtc-service` | Shared Rust SFU that distributes all video. Media goes through this service so many viewers do not congest a mesh. | http://localhost:8082 and UDP 40000-40199 |
 | `caddy` | HTTPS reverse proxy so phones can use the camera and watch live video. | https://localhost:8443 |
+
+Speech in a live room is transcribed on each device and stored with that person’s username. PostgreSQL keeps the broadcast id, the log file path, and each spoken line. Text files are written under `log/YYYY-MM-DD/broadcast-{id}.txt` on the host. Chrome or Edge over HTTPS is required for speech logging; Safari on iPhone often cannot transcribe.
 
 ## How to run
 

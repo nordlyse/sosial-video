@@ -30,7 +30,10 @@ services:
       SMTP_HOST: mailpit
       SMTP_PORT: "1025"
       SMTP_FROM: "Sosial Video <noreply@sosial.local>"
+      TRANSCRIPT_LOG_DIR: /app/log
       RUST_LOG: info
+    volumes:
+      - ./log:/app/log
     ports:
       - "8081:8081"
     depends_on:
