@@ -3,6 +3,7 @@ name = "webrtc-service"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+authors = ["Jakob Lyse <jakob.lyse@gmail.com>"]
 
 [dependencies]
 anyhow = "1"

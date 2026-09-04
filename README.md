@@ -83,6 +83,7 @@ For local testing only. `web-contact-service` inserts these 5 accounts into `fro
 
 |         |                                                     |
 | ------- | --------------------------------------------------- |
-| Name    | Jakob Lyse                                          |
-| GitHub  | [nordlyse](https://github.com/nordlyse)             |
-| Email   | [jakob.lyse@gmail.com](mailto:jakob.lyse@gmail.com) |
+| First name | Jakob                                               |
+| Last name  | Lyse                                                |
+| GitHub     | [nordlyse](https://github.com/nordlyse)             |
+| Email      | [jakob.lyse@gmail.com](mailto:jakob.lyse@gmail.com) |

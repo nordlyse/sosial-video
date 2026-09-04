@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "license": "MIT",
+  "author": "Jakob Lyse <jakob.lyse@gmail.com>",
   "type": "module",
   "scripts": {
     "dev": "vite",
